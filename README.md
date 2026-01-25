@@ -50,10 +50,10 @@ telnet localhost 6379
 ### **Step 1: Basic TCP Server** ✅
 **Concepts**: TCP sockets, basic I/O, Result/Option types
 
-- [ ] Create a TCP listener on port 6379
-- [ ] Accept incoming connections
-- [ ] Read and echo data back to clients
-- [ ] Handle basic errors with `Result<T, E>`
+- [x] Create a TCP listener on port 6379
+- [x] Accept incoming connections
+- [x] Read and echo data back to clients
+- [x] Handle basic errors with `Result<T, E>`
 
 **What You'll Learn**:
 - `std::net::TcpListener` and `TcpStream`
