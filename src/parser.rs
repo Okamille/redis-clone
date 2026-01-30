@@ -1,4 +1,8 @@
-use std::io::{self, BufRead, Read};
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
+
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum RespMessage {
@@ -10,37 +14,41 @@ pub enum RespMessage {
     Null,
 }
 
-pub struct RespParser<R> {
-    reader: io::BufReader<R>,
+pub struct RespParser<R: AsyncRead + Unpin> {
+    reader: tokio::io::BufReader<R>,
 }
 
-impl<R: Read> RespParser<R> {
+impl<R: AsyncRead + Unpin + Send> RespParser<R> {
     pub fn new(inner: R) -> Self {
         return RespParser {
-            reader: io::BufReader::new(inner),
+            reader: tokio::io::BufReader::new(inner),
         };
     }
 
-    pub fn parse_next(&mut self) -> io::Result<RespMessage> {
-        let mut prefix = [0u8];
-        self.reader.read_exact(&mut prefix)?;
+    pub fn parse_next<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = tokio::io::Result<RespMessage>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut prefix = [0u8];
+            self.reader.read_exact(&mut prefix).await?;
 
-        match prefix[0] {
-            b'+' => self.parse_simple_string(),
-            b':' => self.parse_integer(),
-            b'$' => self.parse_bulk_string(),
-            b'*' => self.parse_array(),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Unknown prefix")),
-        }
+            match prefix[0] {
+                b'+' => self.parse_simple_string().await,
+                b':' => self.parse_integer().await,
+                b'$' => self.parse_bulk_string().await,
+                b'*' => self.parse_array().await,
+                _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Unknown prefix")),
+            }
+        })
     }
 
-    pub fn parse_simple_string(&mut self) -> io::Result<RespMessage> {
-        let content = self.read_line()?;
+    pub async fn parse_simple_string(&mut self) -> io::Result<RespMessage> {
+        let content = self.read_line().await?;
         Ok(RespMessage::SimpleString(content.to_string()))
     }
 
-    pub fn parse_integer(&mut self) -> io::Result<RespMessage> {
-        let line = self.read_line()?;
+    pub async fn parse_integer(&mut self) -> io::Result<RespMessage> {
+        let line = self.read_line().await?;
         let n = line
             .parse()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid integer format"))?;
@@ -48,8 +56,8 @@ impl<R: Read> RespParser<R> {
         Ok(RespMessage::Integer(n))
     }
 
-    pub fn parse_bulk_string(&mut self) -> io::Result<RespMessage> {
-        let line = self.read_line()?;
+    pub async fn parse_bulk_string(&mut self) -> io::Result<RespMessage> {
+        let line = self.read_line().await?;
         let length: i64 = line.parse().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "Invalid bulk string length")
         })?;
@@ -59,31 +67,31 @@ impl<R: Read> RespParser<R> {
         }
 
         let mut buffer = vec![0u8; length as usize];
-        self.reader.read_exact(&mut buffer)?;
+        self.reader.read_exact(&mut buffer).await?;
 
         let mut crlf = [0u8; 2];
-        self.reader.read_exact(&mut crlf)?;
+        self.reader.read_exact(&mut crlf).await?;
 
         Ok(RespMessage::BulkString(buffer))
     }
 
-    pub fn parse_array(&mut self) -> io::Result<RespMessage> {
-        let line = self.read_line()?;
+    pub async fn parse_array(&mut self) -> io::Result<RespMessage> {
+        let line = self.read_line().await?;
         let length: i64 = line
             .parse()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid array length"))?;
 
         let mut array = Vec::with_capacity(length as usize);
         for _ in 0..length {
-            array.push(self.parse_next()?);
+            array.push(self.parse_next().await?);
         }
 
         Ok(RespMessage::Array(array))
     }
 
-    fn read_line(&mut self) -> io::Result<String> {
+    async fn read_line(&mut self) -> io::Result<String> {
         let mut line = String::new();
-        self.reader.read_line(&mut line)?;
+        self.reader.read_line(&mut line).await?;
 
         if line.is_empty() {
             return Err(io::Error::new(
@@ -102,38 +110,38 @@ mod tests {
 
     use crate::parser::{RespMessage, RespParser};
 
-    #[test]
-    fn test_parse_simple_string() {
+    #[tokio::test]
+    async fn test_parse_simple_string() {
         let data = b"+OK\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
-        let result = parser.parse_next().unwrap();
+        let result = parser.parse_next().await.unwrap();
 
         assert_eq!(result, RespMessage::SimpleString("OK".to_string()));
     }
 
-    #[test]
-    fn test_parse_integer() {
+    #[tokio::test]
+    async fn test_parse_integer() {
         let data = b":1000\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
-        let result = parser.parse_next().unwrap();
+        let result = parser.parse_next().await.unwrap();
 
         assert_eq!(result, RespMessage::Integer(1000));
     }
 
-    #[test]
-    fn test_parse_bulk_string() {
+    #[tokio::test]
+    async fn test_parse_bulk_string() {
         let data = b"$5\r\nhello\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
-        let result = parser.parse_next().unwrap();
+        let result = parser.parse_next().await.unwrap();
 
         assert_eq!(result, RespMessage::BulkString(b"hello".to_vec()));
     }
 
-    #[test]
-    fn test_parse_array() {
+    #[tokio::test]
+    async fn test_parse_array() {
         let data = b"*3\r\n$5\r\nhello\r\n:1000\r\n+OK\r\n";
         let mut parser = RespParser::new(Cursor::new(data));
-        let result = parser.parse_next().unwrap();
+        let result = parser.parse_next().await.unwrap();
 
         assert_eq!(
             result,
