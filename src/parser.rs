@@ -29,7 +29,7 @@ impl<R: Read> RespParser<R> {
             b'+' => self.parse_simple_string(),
             b':' => self.parse_integer(),
             b'$' => self.parse_bulk_string(),
-            //           b'*' => self.parse_array(),
+            b'*' => self.parse_array(),
             _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Unknown prefix")),
         }
     }
@@ -65,6 +65,20 @@ impl<R: Read> RespParser<R> {
         self.reader.read_exact(&mut crlf)?;
 
         Ok(RespMessage::BulkString(buffer))
+    }
+
+    pub fn parse_array(&mut self) -> io::Result<RespMessage> {
+        let line = self.read_line()?;
+        let length: i64 = line
+            .parse()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid array length"))?;
+
+        let mut array = Vec::with_capacity(length as usize);
+        for _ in 0..length {
+            array.push(self.parse_next()?);
+        }
+
+        Ok(RespMessage::Array(array))
     }
 
     fn read_line(&mut self) -> io::Result<String> {
@@ -113,5 +127,21 @@ mod tests {
         let result = parser.parse_next().unwrap();
 
         assert_eq!(result, RespMessage::BulkString(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn test_parse_array() {
+        let data = b"*3\r\n$5\r\nhello\r\n:1000\r\n+OK\r\n";
+        let mut parser = RespParser::new(Cursor::new(data));
+        let result = parser.parse_next().unwrap();
+
+        assert_eq!(
+            result,
+            RespMessage::Array(vec![
+                RespMessage::BulkString(b"hello".to_vec()),
+                RespMessage::Integer(1000),
+                RespMessage::SimpleString("OK".to_string())
+            ])
+        );
     }
 }
